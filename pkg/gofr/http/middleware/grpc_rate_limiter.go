@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"net"
-
 	"sync"
 	"time"
 
@@ -20,8 +19,8 @@ type GRPCRateLimiterConfig struct {
 	PerIP             bool
 }
 
-type grpcRateLimiter struct {
-	limiters sync.Map // map[string]*rate.Limiter for per-IP
+type GrpcRateLimiter struct {
+	limiters sync.Map
 	global   *rate.Limiter
 	config   GRPCRateLimiterConfig
 	metrics  rateLimiterMetrics
@@ -31,8 +30,8 @@ type rateLimiterMetrics interface {
 	IncrementCounter(ctx context.Context, name string, labels ...string)
 }
 
-func NewGRPCRateLimiter(config GRPCRateLimiterConfig, metrics rateLimiterMetrics) *grpcRateLimiter {
-	rl := &grpcRateLimiter{
+func NewGRPCRateLimiter(config GRPCRateLimiterConfig, metrics rateLimiterMetrics) *GrpcRateLimiter {
+	rl := &GrpcRateLimiter{
 		config:  config,
 		metrics: metrics,
 	}
@@ -48,7 +47,7 @@ func NewGRPCRateLimiter(config GRPCRateLimiterConfig, metrics rateLimiterMetrics
 	return rl
 }
 
-func (rl *grpcRateLimiter) getLimiter(ip string) *rate.Limiter {
+func (rl *GrpcRateLimiter) getLimiter(ip string) *rate.Limiter {
 	if !rl.config.PerIP {
 		return rl.global
 	}
@@ -62,7 +61,7 @@ func (rl *grpcRateLimiter) getLimiter(ip string) *rate.Limiter {
 	return limiter
 }
 
-func (rl *grpcRateLimiter) cleanupStaleEntries() {
+func (rl *GrpcRateLimiter) cleanupStaleEntries() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
@@ -78,16 +77,31 @@ func (rl *grpcRateLimiter) cleanupStaleEntries() {
 }
 
 func getGRPCIP(ctx context.Context) string {
-	ip := "unknown"
-
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
-		ip, _, _ = net.SplitHostPort(p.Addr.String())
+		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil && host != "" {
+			return host
+		}
+		// Try to get IP directly if SplitHostPort fails
+		switch addr := p.Addr.(type) {
+		case *net.TCPAddr:
+			if addr.IP != nil {
+				return addr.IP.String()
+			}
+		case *net.UDPAddr:
+			if addr.IP != nil {
+				return addr.IP.String()
+			}
+		case *net.IPAddr:
+			if addr.IP != nil {
+				return addr.IP.String()
+			}
+		}
 	}
 
-	return ip
+	return "unknown"
 }
 
-func (rl *grpcRateLimiter) Unary() grpc.UnaryServerInterceptor {
+func (rl *GrpcRateLimiter) Unary() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 		ip := getGRPCIP(ctx)
 		limiter := rl.getLimiter(ip)
@@ -104,7 +118,7 @@ func (rl *grpcRateLimiter) Unary() grpc.UnaryServerInterceptor {
 	}
 }
 
-func (rl *grpcRateLimiter) Stream() grpc.StreamServerInterceptor {
+func (rl *GrpcRateLimiter) Stream() grpc.StreamServerInterceptor {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ip := "unknown"
 		if p, ok := peer.FromContext(ss.Context()); ok && p.Addr != nil {
