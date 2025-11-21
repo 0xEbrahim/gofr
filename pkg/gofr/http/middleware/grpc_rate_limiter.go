@@ -103,3 +103,23 @@ func (rl *grpcRateLimiter) Unary() grpc.UnaryServerInterceptor {
 		return handler(ctx, req)
 	}
 }
+
+func (rl *grpcRateLimiter) Stream() grpc.StreamServerInterceptor {
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		ip := "unknown"
+		if p, ok := peer.FromContext(ss.Context()); ok && p.Addr != nil {
+			ip, _, _ = net.SplitHostPort(p.Addr.String())
+		}
+
+		limiter := rl.getLimiter(ip)
+		if !limiter.Allow() {
+			if rl.metrics != nil {
+				rl.metrics.IncrementCounter(ss.Context(), "app_grpc_rate_limit_exceeded_total",
+					"method", info.FullMethod, "ip", ip)
+			}
+			return status.Error(codes.ResourceExhausted, "rate limit exceeded")
+		}
+
+		return handler(srv, ss)
+	}
+}
